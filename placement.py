@@ -377,7 +377,7 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     return (total_overlap + 0.5 * squared_overlap) / num_pairs
 
 
-def shelf_pack_placement(cell_features, target_aspect=1.0, gap=0.01):
+def shelf_pack_placement(cell_features, order=None, target_aspect=1.0, gap=0.01):
     """Create a deterministic non-overlapping placement using shelf packing.
 
     Cells are packed row-by-row (largest area first) into shelves with a target
@@ -392,19 +392,21 @@ def shelf_pack_placement(cell_features, target_aspect=1.0, gap=0.01):
     Returns:
         cell_features with updated positions in-place
     """
-    N = cell_features.shape[0]
+    packed_features = cell_features.clone()
+    N = packed_features.shape[0]
     if N <= 1:
-        return cell_features
+        return packed_features
 
-    widths = cell_features[:, 4]
-    heights = cell_features[:, 5]
-    areas = cell_features[:, 0]
+    widths = packed_features[:, 4]
+    heights = packed_features[:, 5]
+    areas = packed_features[:, 0]
 
     total_area = torch.sum(areas).item()
     target_row_width = max((total_area ** 0.5) * target_aspect, 1e-3)
 
-    # place larger cells first to reduce fragmentation.
-    order = torch.argsort(areas, descending=True)
+    # place larger cells first when no explicit order is provided.
+    if order is None:
+        order = torch.argsort(areas, descending=True)
 
     packed_x = torch.zeros_like(widths)
     packed_y = torch.zeros_like(heights)
@@ -429,13 +431,157 @@ def shelf_pack_placement(cell_features, target_aspect=1.0, gap=0.01):
         row_height = max(row_height, h)
 
     # recenter around original centroid (translation-invariant for wirelength).
-    packed_x = packed_x - packed_x.mean() + cell_features[:, 2].mean()
-    packed_y = packed_y - packed_y.mean() + cell_features[:, 3].mean()
+    packed_x = packed_x - packed_x.mean() + packed_features[:, 2].mean()
+    packed_y = packed_y - packed_y.mean() + packed_features[:, 3].mean()
 
-    cell_features[:, 2] = packed_x
-    cell_features[:, 3] = packed_y
+    packed_features[:, 2] = packed_x
+    packed_features[:, 3] = packed_y
 
-    return cell_features
+    return packed_features
+
+
+def generate_candidate_orders(cell_features, random_seed=0, n_rand=60):
+    """Generate deterministic candidate orderings for shelf packing."""
+    N = cell_features.shape[0]
+    if N <= 1:
+        return [torch.arange(N, device=cell_features.device)]
+
+    areas = cell_features[:, CellFeatureIdx.AREA]
+    num_pins = cell_features[:, CellFeatureIdx.NUM_PINS]
+    widths = cell_features[:, CellFeatureIdx.WIDTH]
+    heights = cell_features[:, CellFeatureIdx.HEIGHT]
+
+    orders = []
+
+    # deterministic base orderings
+    orders.append(torch.argsort(areas, descending=True))
+    orders.append(torch.argsort(areas * num_pins, descending=True))
+    orders.append(torch.argsort(torch.sqrt(areas) * num_pins, descending=True))
+    orders.append(torch.argsort(heights, descending=True))
+
+    # macro-first ordering for this challenge data distribution
+    macro_mask = areas > 10.0
+    macro_idx = torch.where(macro_mask)[0]
+    std_idx = torch.where(~macro_mask)[0]
+    if macro_idx.numel() > 0:
+        macro_order = macro_idx[torch.argsort(areas[macro_idx], descending=True)]
+    else:
+        macro_order = macro_idx
+    if std_idx.numel() > 0:
+        std_order = std_idx[torch.argsort(num_pins[std_idx], descending=True)]
+    else:
+        std_order = std_idx
+    orders.append(torch.cat([macro_order, std_order], dim=0))
+
+    # deterministic noisy order variants for local search
+    generator = torch.Generator()
+    generator.manual_seed(int(random_seed) + 99991)
+    noise_bank = torch.randn((n_rand, N), generator=generator, device=cell_features.device)
+
+    base_scores = [
+        areas,
+        areas * num_pins,
+        torch.sqrt(areas) * num_pins,
+        areas + 0.25 * num_pins,
+        widths * heights + 0.5 * num_pins,
+    ]
+    noise_scales = [0.01, 0.02, 0.04, 0.08, 0.12]
+
+    for i in range(n_rand):
+        base_score = base_scores[i % len(base_scores)]
+        scale = noise_scales[i % len(noise_scales)]
+        normalized = base_score / (torch.mean(torch.abs(base_score)) + 1e-8)
+        score = normalized + scale * noise_bank[i]
+        orders.append(torch.argsort(score, descending=True))
+
+    # deduplicate
+    deduped_orders = []
+    seen = set()
+    prefix_len = min(16, N)
+    for order in orders:
+        key = (tuple(order[:prefix_len].tolist()), int(order.numel()))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_orders.append(order)
+
+    return deduped_orders
+
+
+def search_best_shelf_placement(
+    cell_features,
+    pin_features,
+    edge_list,
+    random_seed=0,
+    n_rand=60,
+):
+    """Search over shelf-pack candidates and return the lowest-wirelength legal placement."""
+    candidate_orders = generate_candidate_orders(
+        cell_features, random_seed=random_seed, n_rand=n_rand
+    )
+
+    aspect_candidates = [0.7, 0.8, 0.9, 1.0, 1.2, 1.4]
+    gap_candidates = [0.01, 0.03, 0.05]
+
+    total_area = torch.sum(cell_features[:, CellFeatureIdx.AREA]).item()
+    area_norm = total_area ** 0.5 if total_area > 0 else 1.0
+
+    best_placement = None
+    best_normalized_wl = float("inf")
+
+    for order in candidate_orders:
+        for aspect in aspect_candidates:
+            for gap in gap_candidates:
+                candidate = shelf_pack_placement(
+                    cell_features, order=order, target_aspect=aspect, gap=gap
+                )
+                wl_loss = wirelength_attraction_loss(candidate, pin_features, edge_list)
+                normalized_wl = wl_loss.item() / area_norm
+
+                if normalized_wl < best_normalized_wl:
+                    best_normalized_wl = normalized_wl
+                    best_placement = candidate
+
+    if best_placement is None:
+        best_placement = shelf_pack_placement(cell_features, target_aspect=1.0, gap=0.05)
+
+    return best_placement
+
+
+def refine_local_placement(
+    cell_features,
+    pin_features,
+    edge_list,
+    num_epochs=220,
+    lr=0.02,
+    lambda_overlap=350.0,
+):
+    """Refine a legal placement with local gradient descent, then legalize again."""
+    base_features = cell_features.clone()
+    positions = base_features[:, 2:4].clone().detach()
+    positions.requires_grad_(True)
+
+    optimizer = optim.Adam([positions], lr=lr)
+
+    for _ in range(num_epochs):
+        optimizer.zero_grad()
+
+        current = base_features.clone()
+        current[:, 2:4] = positions
+
+        wl_loss = wirelength_attraction_loss(current, pin_features, edge_list)
+        overlap_loss = overlap_repulsion_loss(current, pin_features, edge_list)
+        total_loss = wl_loss + lambda_overlap * overlap_loss
+
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_([positions], max_norm=5.0)
+        optimizer.step()
+
+    refined = base_features.clone()
+    refined[:, 2:4] = positions.detach()
+    refined = legalize_overlaps(refined, max_iters=300, step_size=0.8)
+
+    return refined
 
 
 def legalize_overlaps(cell_features, max_iters=200, step_size=0.8, eps=1e-3):
@@ -606,10 +752,36 @@ def train_placement(
     final_cell_features = cell_features.clone()
     final_cell_features[:, 2:4] = cell_positions.detach()
 
-    # fast deterministic packing gives overlap-free placement with low runtime.
-    final_cell_features = shelf_pack_placement(
-        final_cell_features, target_aspect=1.0, gap=0.01
+    # run deterministic candidate search over legal shelf-pack placements.
+    search_seed = int(torch.initial_seed())
+    final_cell_features = search_best_shelf_placement(
+        final_cell_features,
+        pin_features,
+        edge_list,
+        random_seed=search_seed,
+        n_rand=60,
     )
+
+    # local refinement is robust for small and medium instances.
+    if final_cell_features.shape[0] <= 300:
+        if final_cell_features.shape[0] < 120:
+            local_epochs = 300
+            local_lr = 0.03
+        elif final_cell_features.shape[0] <= 220:
+            local_epochs = 350
+            local_lr = 0.02
+        else:
+            local_epochs = 220
+            local_lr = 0.02
+
+        final_cell_features = refine_local_placement(
+            final_cell_features,
+            pin_features,
+            edge_list,
+            num_epochs=local_epochs,
+            lr=local_lr,
+            lambda_overlap=350.0,
+        )
 
     # safety net in case of numerical edge cases.
     if len(calculate_cells_with_overlaps(final_cell_features)) > 0:
