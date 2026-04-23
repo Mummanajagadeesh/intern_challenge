@@ -41,7 +41,7 @@ We will review submissions on a rolling basis.
  8   | Shashank Shriram  | 0.0000     | 0.3312          |  11.32      |   🏎️💥               |
 | 9    | Gabriel Del Monte  | 0.0000      | 0.3427          | 606.07      |                                                              |
 | 10    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |        
-| 11   | Jagadeesh Mummana | 0.0000      | 0.4313          | 5.69s       | shelf pack + overlap loss |
+| 11   | Jagadeesh Mummana | 0.0000      | 0.3853          | 37.59s      | candidate shelf search + local refine |
 | 12   | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
 | 13    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
 | 14    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
