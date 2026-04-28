@@ -37,11 +37,11 @@ We will review submissions on a rolling basis.
 | 4    | Leison Gao      | 0.0000      | 0.2796          | 50.14s      |                      |
 | 5    | William Pan     | 0.0000      | 0.2848          | 155.33s     |                      |
 | 6    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
-| 7    | Pawan Paleja     | 0.0000      | 0.3311         | 1.74s     |   Implemented hint for loss func, cosine annealing on learning rate with warmup, std annealing on lambda weight. Used optuna to tune hyperparam. Tested on gh codespaces 2-core.                   |
- 8   | Shashank Shriram  | 0.0000     | 0.3312          |  11.32      |   🏎️💥               |
-| 9    | Gabriel Del Monte  | 0.0000      | 0.3427          | 606.07      |                                                              |
-| 10    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |        
-| 11   | Jagadeesh Mummana | 0.0000      | 0.3853          | 37.59s      | candidate shelf search + local refine |
+| 7    | Jagadeesh Mummana | 0.0000      | 0.2980          | 59.62s      | candidate shelf search + local refine |
+| 8    | Pawan Paleja      | 0.0000      | 0.3311          | 1.74s       | Implemented hint for loss func, cosine annealing on learning rate with warmup, std annealing on lambda weight. Used optuna to tune hyperparam. Tested on gh codespaces 2-core. |
+| 9    | Shashank Shriram  | 0.0000      | 0.3312          | 11.32       | fast setup |
+| 10   | Gabriel Del Monte | 0.0000      | 0.3427          | 606.07      | |
+| 11   | Aleksey Valouev   | 0.0000      | 0.3577          | 118.98      | |
 | 12   | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
 | 13    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
 | 14    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
