@@ -669,6 +669,66 @@ def refine_local_placement(
     return legalize_overlaps(refined, max_iters=250, step_size=0.85)
 
 
+def optimize_tiny_case_wirelength(
+    cell_features,
+    pin_features,
+    edge_list,
+    restarts=4,
+    num_epochs=4000,
+    lr=0.03,
+):
+    """Extra wirelength-focused search for very small designs."""
+    N = cell_features.shape[0]
+    if N <= 1:
+        return cell_features.clone()
+
+    total_area = torch.sum(cell_features[:, CellFeatureIdx.AREA]).item()
+    jitter_scale = (total_area**0.5) * 0.2
+    center = cell_features[:, 2:4].mean(dim=0, keepdim=True)
+    base_seed = int(torch.initial_seed())
+
+    best_candidate = cell_features.clone()
+    best_overlaps = len(calculate_cells_with_overlaps(best_candidate))
+    best_wl = wirelength_attraction_loss(best_candidate, pin_features, edge_list).item()
+
+    for restart_idx in range(restarts):
+        generator = torch.Generator(device=cell_features.device)
+        generator.manual_seed(base_seed + 7919 * (restart_idx + 1))
+
+        trial = cell_features.clone()
+        noise = torch.randn((N, 2), generator=generator, device=cell_features.device)
+        trial[:, 2:4] = center + jitter_scale * noise
+
+        positions = trial[:, 2:4].clone().detach()
+        positions.requires_grad_(True)
+        optimizer = optim.Adam([positions], lr=lr)
+
+        for _ in range(num_epochs):
+            optimizer.zero_grad()
+            current = trial.clone()
+            current[:, 2:4] = positions
+            wl_loss = wirelength_attraction_loss(current, pin_features, edge_list)
+            wl_loss.backward()
+            torch.nn.utils.clip_grad_norm_([positions], max_norm=5.0)
+            optimizer.step()
+
+        candidate = trial.clone()
+        candidate[:, 2:4] = positions.detach()
+        candidate = legalize_overlaps(candidate, max_iters=6000, step_size=0.95)
+
+        overlap_count = len(calculate_cells_with_overlaps(candidate))
+        wl_value = wirelength_attraction_loss(candidate, pin_features, edge_list).item()
+
+        if overlap_count < best_overlaps or (
+            overlap_count == best_overlaps and wl_value < best_wl
+        ):
+            best_candidate = candidate
+            best_overlaps = overlap_count
+            best_wl = wl_value
+
+    return best_candidate
+
+
 def train_placement(
     cell_features,
     pin_features,
@@ -752,22 +812,42 @@ def train_placement(
     final_cell_features = cell_features.clone()
     final_cell_features[:, 2:4] = cell_positions.detach()
 
-    # Build legal starting point and then do small local refinement on manageable sizes.
-    search_seed = int(torch.initial_seed())
-    final_cell_features = search_best_shelf_placement(
-        final_cell_features,
-        pin_features,
-        edge_list,
-        random_seed=search_seed,
-    )
+    # Build legal starting point and then do local refinement.
+    if final_cell_features.shape[0] <= 24:
+        final_cell_features = optimize_tiny_case_wirelength(
+            final_cell_features,
+            pin_features,
+            edge_list,
+            restarts=2,
+            num_epochs=3000,
+            lr=0.03,
+        )
+    else:
+        search_seed = int(torch.initial_seed())
+        final_cell_features = search_best_shelf_placement(
+            final_cell_features,
+            pin_features,
+            edge_list,
+            random_seed=search_seed,
+        )
 
     if final_cell_features.shape[0] <= 320:
-        if final_cell_features.shape[0] <= 120:
+        base_candidate = final_cell_features.clone()
+
+        if final_cell_features.shape[0] <= 60:
+            local_epochs = 3000
+            local_lr = 0.03
+            local_lambda_overlap = 3.0
+        elif final_cell_features.shape[0] <= 90:
+            local_epochs = 1800
+            local_lr = 0.03
+            local_lambda_overlap = 2.0
+        elif final_cell_features.shape[0] <= 120:
             local_epochs = 3000
             local_lr = 0.03
             local_lambda_overlap = 3.0
         elif final_cell_features.shape[0] <= 220:
-            local_epochs = 1800
+            local_epochs = 2200
             local_lr = 0.025
             local_lambda_overlap = 4.0
         else:
@@ -782,6 +862,18 @@ def train_placement(
             lr=local_lr,
             lambda_overlap=local_lambda_overlap,
         )
+
+        base_overlaps = len(calculate_cells_with_overlaps(base_candidate))
+        refined_overlaps = len(calculate_cells_with_overlaps(final_cell_features))
+        if base_overlaps == 0 and refined_overlaps == 0:
+            base_wl = wirelength_attraction_loss(
+                base_candidate, pin_features, edge_list
+            ).item()
+            refined_wl = wirelength_attraction_loss(
+                final_cell_features, pin_features, edge_list
+            ).item()
+            if base_wl <= refined_wl:
+                final_cell_features = base_candidate
 
     if len(calculate_cells_with_overlaps(final_cell_features)) > 0:
         legalization_iters = 1800 if final_cell_features.shape[0] <= 220 else 800
